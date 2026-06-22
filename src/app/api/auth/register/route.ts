@@ -1,9 +1,30 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { hashPassword, issueSessionForUser } from "@/lib/auth";
+import {
+  hashPassword,
+  isMobileAuthClient,
+  issueSessionForUser,
+} from "@/lib/auth";
+import {
+  enforceRateLimit,
+  rejectUntrustedOrigin,
+  requireJson,
+} from "@/lib/api-security";
 
 export async function POST(request: Request) {
   try {
+    const originError = rejectUntrustedOrigin(request);
+    if (originError) return originError;
+    const contentTypeError = requireJson(request);
+    if (contentTypeError) return contentTypeError;
+    const rateLimitError = await enforceRateLimit({
+      request,
+      scope: "register",
+      limit: 5,
+      windowSeconds: 60 * 60,
+    });
+    if (rateLimitError) return rateLimitError;
+
     const { email, password, confirmPassword, firstName, lastName, confirmEmail } =
       await request.json();
     if (!email || !password || !firstName || !lastName) {
@@ -14,18 +35,21 @@ export async function POST(request: Request) {
     }
 
     const normalizedEmail = String(email).toLowerCase().trim();
-    const normalizedConfirmEmail = String(confirmEmail ?? "").toLowerCase().trim();
+    const normalizedConfirmEmail = String(confirmEmail ?? "")
+      .toLowerCase()
+      .trim();
     if (normalizedEmail !== normalizedConfirmEmail) {
       return NextResponse.json(
         { message: "Los correos no coinciden." },
         { status: 400 },
       );
     }
-    if (normalizedEmail.length < 5 || !normalizedEmail.includes("@")) {
-      return NextResponse.json(
-        { message: "Email no válido" },
-        { status: 400 },
-      );
+    if (
+      normalizedEmail.length < 5 ||
+      normalizedEmail.length > 254 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)
+    ) {
+      return NextResponse.json({ message: "Email no válido." }, { status: 400 });
     }
     if (String(password) !== String(confirmPassword ?? "")) {
       return NextResponse.json(
@@ -33,9 +57,23 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
-    if (String(password).length < 8) {
+    if (String(password).length < 8 || String(password).length > 128) {
       return NextResponse.json(
-        { message: "La contraseña debe tener al menos 8 caracteres." },
+        { message: "La contraseña debe tener entre 8 y 128 caracteres." },
+        { status: 400 },
+      );
+    }
+
+    const normalizedFirstName = String(firstName).trim();
+    const normalizedLastName = String(lastName).trim();
+    if (
+      normalizedFirstName.length < 1 ||
+      normalizedFirstName.length > 80 ||
+      normalizedLastName.length < 1 ||
+      normalizedLastName.length > 80
+    ) {
+      return NextResponse.json(
+        { message: "Nombre y apellido no son válidos." },
         { status: 400 },
       );
     }
@@ -55,19 +93,35 @@ export async function POST(request: Request) {
       data: {
         email: normalizedEmail,
         passwordHash,
-        firstName: String(firstName).trim(),
-        lastName: String(lastName).trim(),
+        firstName: normalizedFirstName,
+        lastName: normalizedLastName,
       },
-      select: { id: true, email: true, createdAt: true, firstName: true, lastName: true },
+      select: {
+        id: true,
+        email: true,
+        createdAt: true,
+        firstName: true,
+        lastName: true,
+      },
     });
 
-    await issueSessionForUser(user.id);
+    const mobile = isMobileAuthClient(request);
+    const tokens = await issueSessionForUser(user.id, request, !mobile);
+    const authPayload = mobile
+      ? {
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          tokenType: "Bearer",
+          expiresIn: tokens.expiresIn,
+          refreshExpiresIn: tokens.refreshExpiresIn,
+        }
+      : { expiresIn: tokens.expiresIn };
 
-    return NextResponse.json({ user }, { status: 201 });
+    return NextResponse.json({ ...authPayload, user }, { status: 201 });
   } catch (error) {
     console.error("[auth][register]", error);
     return NextResponse.json(
-      { message: "No pudimos crear tu cuenta" },
+      { message: "No pudimos crear tu cuenta." },
       { status: 500 },
     );
   }

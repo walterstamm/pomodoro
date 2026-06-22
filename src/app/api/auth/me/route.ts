@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { currentUser } from "@/lib/auth";
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const user = await currentUser();
+    const user = await currentUser(request);
     if (!user) {
       return NextResponse.json({ user: null }, { status: 401 });
     }

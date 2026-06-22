@@ -2,7 +2,10 @@
 "use client";
 
 import dynamic from "next/dynamic";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import useSound from "use-sound";
+import { apiFetch } from "@/lib/client-api";
+import { computeRemainingSeconds, minutesBetween } from "../utils/time";
 
 const FlipClockCountdown = dynamic(
   () => import("@leenguyen/react-flip-clock-countdown").then((m) => m.default),
@@ -22,15 +25,48 @@ type Project = {
   id: string;
   name: string;
   color: string;
+  goalPeriod: GoalPeriod | null;
+  goalMinutes: number | null;
   createdAt: string;
   sessions?: Session[];
 };
 
 type TimerState = "idle" | "running" | "paused";
 type User = { id: string; email: string };
+type SoundChoice = "campana" | "digital" | "none";
+type GoalPeriod = "DAILY" | "WEEKLY";
 
 const palettes = ["#7BD1FF", "#FFB4BC", "#C6FF7B", "#B7A3FF", "#FFD27B"];
 const BRAND = "FocoPulse";
+const GOAL_PERIOD_LABELS: Record<GoalPeriod, string> = {
+  DAILY: "diaria",
+  WEEKLY: "semanal",
+};
+const GOAL_PERIOD_COPY: Record<GoalPeriod, string> = {
+  DAILY: "Hoy",
+  WEEKLY: "Esta semana",
+};
+const SOUND_OPTIONS: Record<
+  SoundChoice,
+  { label: string; file: string | null; helper?: string }
+> = {
+  campana: {
+    label: "Campana suave",
+    file: "/sounds/campana.wav",
+    helper: "Tono corto, tipo campana",
+  },
+  digital: {
+    label: "Bip digital",
+    file: "/sounds/digital.wav",
+    helper: "Pitido breve estilo reloj",
+  },
+  none: {
+    label: "Sin sonido",
+    file: null,
+    helper: "Solo se mostrará la notificación",
+  },
+};
+const SOUND_ORDER: SoundChoice[] = ["campana", "digital", "none"];
 
 const toClock = (seconds: number) => {
   const mins = Math.floor(seconds / 60)
@@ -47,6 +83,20 @@ const friendlyMinutes = (minutes: number) => {
   const hours = Math.floor(minutes / 60);
   const mins = minutes % 60;
   return mins ? `${hours}h ${mins}m` : `${hours}h`;
+};
+
+const getGoalWindow = (period: GoalPeriod, now: Date) => {
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+
+  if (period === "WEEKLY") {
+    const mondayOffset = (start.getDay() + 6) % 7;
+    start.setDate(start.getDate() - mondayOffset);
+  }
+
+  const end = new Date(start);
+  end.setDate(end.getDate() + (period === "DAILY" ? 1 : 7));
+  return { start, end };
 };
 
 const hexToRgba = (hex: string, alpha: number) => {
@@ -71,6 +121,9 @@ export default function Home() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [projectName, setProjectName] = useState("");
   const [isSavingProject, setIsSavingProject] = useState(false);
+  const [goalPeriod, setGoalPeriod] = useState<GoalPeriod>("DAILY");
+  const [goalMinutes, setGoalMinutes] = useState("120");
+  const [isSavingGoal, setIsSavingGoal] = useState(false);
 
   const [duration, setDuration] = useState(25);
   const [secondsLeft, setSecondsLeft] = useState(duration * 60);
@@ -81,10 +134,26 @@ export default function Home() {
   const [user, setUser] = useState<User | null>(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [navOpen, setNavOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [fullScreen, setFullScreen] = useState(false);
   const [flipMode, setFlipMode] = useState(false);
   const [freezeNow, setFreezeNow] = useState<number | null>(Date.now());
   const [isMobile, setIsMobile] = useState(false);
+  const [soundChoice, setSoundChoice] = useState<SoundChoice>("campana");
+  const soundChoiceRef = useRef<SoundChoice>("campana");
+  const completingRef = useRef(false);
+  const endTimeRef = useRef<Date | null>(null);
+  const pendingSoundRef = useRef(false);
+
+  const commonSoundOpts = { html5: true as const, preload: true, interrupt: true };
+  const [playCampana] = useSound(SOUND_OPTIONS.campana.file!, {
+    volume: 0.5,
+    ...commonSoundOpts,
+  });
+  const [playDigital] = useSound(SOUND_OPTIONS.digital.file!, {
+    volume: 0.45,
+    ...commonSoundOpts,
+  });
 
   const activeProject = useMemo(
     () => projects.find((p) => p.id === selectedProjectId) ?? null,
@@ -92,9 +161,20 @@ export default function Home() {
   );
 
   useEffect(() => {
+    if (!activeProject) return;
+    setGoalPeriod(activeProject.goalPeriod ?? "DAILY");
+    setGoalMinutes(
+      String(
+        activeProject.goalMinutes ??
+          (activeProject.goalPeriod === "WEEKLY" ? 600 : 120),
+      ),
+    );
+  }, [activeProject?.id, activeProject?.goalPeriod, activeProject?.goalMinutes]);
+
+  useEffect(() => {
     const fetchUser = async () => {
       try {
-        const res = await fetch("/api/auth/me", { cache: "no-store" });
+        const res = await apiFetch("/api/auth/me", { cache: "no-store" });
         if (res.ok) {
           const data = await res.json();
           setUser(data.user);
@@ -121,7 +201,7 @@ export default function Home() {
       }
       setLoading(true);
       try {
-        const res = await fetch("/api/projects", { cache: "no-store" });
+        const res = await apiFetch("/api/projects", { cache: "no-store" });
         if (!res.ok) throw new Error("No se pudieron cargar los proyectos");
         const data = await res.json();
         const loadedProjects: Project[] = data.projects ?? [];
@@ -155,18 +235,18 @@ export default function Home() {
 
   useEffect(() => {
     if (timerState !== "running") return;
-    const interval = setInterval(() => {
-      setSecondsLeft((prev) => {
-        if (prev <= 1) {
-          clearInterval(interval);
-          handleComplete();
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
+    const tick = () => {
+      if (!endTimeRef.current) return;
+      const remainingSeconds = computeRemainingSeconds(endTimeRef.current);
+      setSecondsLeft(remainingSeconds);
+      if (remainingSeconds <= 0) {
+        handleComplete();
+      }
+    };
+    tick();
+    const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
-  }, [timerState, duration]);
+  }, [timerState]);
 
   useEffect(() => {
     if (timerState === "idle") {
@@ -189,6 +269,30 @@ export default function Home() {
       ),
     [sessions, selectedProjectId],
   );
+
+  const activeGoalProgress = useMemo(() => {
+    if (!activeProject?.goalPeriod || !activeProject.goalMinutes) return null;
+
+    const { start, end } = getGoalWindow(activeProject.goalPeriod, new Date());
+    const completedMinutes = filteredSessions.reduce((total, session) => {
+      const startedAt = new Date(session.startedAt);
+      if (startedAt >= start && startedAt < end) {
+        return total + session.durationMinutes;
+      }
+      return total;
+    }, 0);
+    const targetMinutes = activeProject.goalMinutes;
+    const percentage = Math.min(100, Math.round((completedMinutes / targetMinutes) * 100));
+
+    return {
+      completedMinutes,
+      targetMinutes,
+      percentage,
+      remainingMinutes: Math.max(0, targetMinutes - completedMinutes),
+      windowLabel: GOAL_PERIOD_COPY[activeProject.goalPeriod],
+      periodLabel: GOAL_PERIOD_LABELS[activeProject.goalPeriod],
+    };
+  }, [activeProject, filteredSessions]);
 
   const today = new Date();
   const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate();
@@ -229,7 +333,7 @@ export default function Home() {
     }
     setIsSavingProject(true);
     try {
-      const res = await fetch("/api/projects", {
+      const res = await apiFetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -265,7 +369,7 @@ export default function Home() {
     }
     if (!confirm("¿Eliminar este proyecto y sus sesiones?")) return;
     try {
-      const res = await fetch(`/api/projects/${id}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/projects/${id}`, { method: "DELETE" });
       if (!res.ok) throw new Error("No se pudo eliminar");
       setProjects((prev) => prev.filter((p) => p.id !== id));
       setSessions((prev) => prev.filter((s) => s.projectId !== id));
@@ -279,44 +383,142 @@ export default function Home() {
     }
   };
 
+  const saveProjectGoal = async () => {
+    if (!activeProject) {
+      showFlash("Selecciona un proyecto para configurar su meta.");
+      return;
+    }
+
+    const maxGoalMinutes = goalPeriod === "DAILY" ? 1440 : 10080;
+    const parsedGoalMinutes = Number(goalMinutes);
+    const normalizedMinutes = Math.round(parsedGoalMinutes);
+    if (
+      goalMinutes.trim() === "" ||
+      !Number.isFinite(parsedGoalMinutes) ||
+      normalizedMinutes < 1 ||
+      normalizedMinutes > maxGoalMinutes
+    ) {
+      showFlash(
+        `La meta ${GOAL_PERIOD_LABELS[goalPeriod]} debe estar entre 1 y ${maxGoalMinutes} minutos.`,
+      );
+      return;
+    }
+
+    setIsSavingGoal(true);
+    try {
+      const res = await apiFetch(`/api/projects/${activeProject.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          goalPeriod,
+          goalMinutes: normalizedMinutes,
+        }),
+      });
+      if (!res.ok) throw new Error("No se pudo guardar la meta");
+      const updatedProject: Project = await res.json();
+      setProjects((prev) =>
+        prev.map((project) =>
+          project.id === updatedProject.id
+            ? { ...updatedProject, sessions: updatedProject.sessions ?? project.sessions }
+            : project,
+        ),
+      );
+      showFlash("Meta guardada");
+    } catch (error) {
+      console.error(error);
+      showFlash("No se pudo guardar la meta");
+    } finally {
+      setIsSavingGoal(false);
+    }
+  };
+
+  const clearProjectGoal = async () => {
+    if (!activeProject) return;
+
+    setIsSavingGoal(true);
+    try {
+      const res = await apiFetch(`/api/projects/${activeProject.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ goalPeriod: null, goalMinutes: null }),
+      });
+      if (!res.ok) throw new Error("No se pudo quitar la meta");
+      const updatedProject: Project = await res.json();
+      setProjects((prev) =>
+        prev.map((project) =>
+          project.id === updatedProject.id
+            ? { ...updatedProject, sessions: updatedProject.sessions ?? project.sessions }
+            : project,
+        ),
+      );
+      showFlash("Meta desactivada");
+    } catch (error) {
+      console.error(error);
+      showFlash("No se pudo quitar la meta");
+    } finally {
+      setIsSavingGoal(false);
+    }
+  };
+
   const startTimer = () => {
     if (!selectedProjectId) {
       showFlash("Crea y selecciona un proyecto antes de comenzar.");
       return;
     }
-    setStartedAt(new Date());
+    const now = new Date();
+    setStartedAt(now);
+    endTimeRef.current = new Date(now.getTime() + duration * 60 * 1000);
     setSecondsLeft(duration * 60);
     setTimerState("running");
   };
 
-  const pauseTimer = () => setTimerState("paused");
-  const resumeTimer = () => setTimerState("running");
+  const pauseTimer = () => {
+    setTimerState("paused");
+    endTimeRef.current = null;
+  };
+  const resumeTimer = () => {
+    endTimeRef.current = new Date(Date.now() + secondsLeft * 1000);
+    setTimerState("running");
+  };
+  const finishNow = () => {
+    setSecondsLeft(0);
+    handleComplete(new Date());
+  };
   const resetTimer = () => {
     setTimerState("idle");
     setSecondsLeft(duration * 60);
     setStartedAt(null);
+    endTimeRef.current = null;
+    completingRef.current = false;
+    pendingSoundRef.current = false;
   };
 
-  const handleComplete = async () => {
+  const handleComplete = async (forcedEndTime?: Date) => {
+    if (completingRef.current) return;
+    completingRef.current = true;
+
     setTimerState("idle");
-    const endTime = new Date();
+    playCompletionSound();
+    const endTime = forcedEndTime ?? new Date();
     const startTime =
       startedAt ?? new Date(endTime.getTime() - (duration * 60 - secondsLeft) * 1000);
+    const actualMinutes = minutesBetween(startTime, endTime);
 
     if (!selectedProjectId) {
       resetTimer();
+      completingRef.current = false;
       return;
     }
 
-    const sessionPayload = {
-      projectId: selectedProjectId,
-      startedAt: startTime.toISOString(),
-      endedAt: endTime.toISOString(),
-      durationMinutes: duration,
-    };
+      const sessionPayload = {
+        projectId: selectedProjectId,
+        startedAt: startTime.toISOString(),
+        endedAt: endTime.toISOString(),
+        durationMinutes: actualMinutes,
+      };
 
     try {
-      const res = await fetch("/api/sessions", {
+      const res = await apiFetch("/api/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(sessionPayload),
@@ -324,11 +526,19 @@ export default function Home() {
       if (!res.ok) throw new Error("No se pudo guardar la sesión");
       const session: Session = await res.json();
 
-      setSessions((prev) => [session, ...prev]);
+      setSessions((prev) =>
+        prev.some((s) => s.id === session.id) ? prev : [session, ...prev],
+      );
       setProjects((prev) =>
         prev.map((p) =>
           p.id === session.projectId
-            ? { ...p, sessions: [session, ...(p.sessions ?? [])] }
+            ? (() => {
+                const already = (p.sessions ?? []).some((s) => s.id === session.id);
+                return {
+                  ...p,
+                  sessions: already ? p.sessions : [session, ...(p.sessions ?? [])],
+                };
+              })()
             : p,
         ),
       );
@@ -338,6 +548,7 @@ export default function Home() {
       showFlash("No pudimos guardar la sesión");
     } finally {
       resetTimer();
+      completingRef.current = false;
     }
   };
 
@@ -366,12 +577,107 @@ export default function Home() {
   }, [timerState]);
 
   useEffect(() => {
+    soundChoiceRef.current = soundChoice;
+  }, [soundChoice]);
+
+  useEffect(() => {
+    if (!user) {
+      setSettingsOpen(false);
+    }
+  }, [user]);
+
+  useEffect(() => {
     const compute = () =>
       setIsMobile(typeof window !== "undefined" ? window.innerWidth < 640 : false);
     compute();
     window.addEventListener("resize", compute);
     return () => window.removeEventListener("resize", compute);
   }, []);
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (typeof document === "undefined" || document.visibilityState !== "visible") return;
+
+      if (timerState === "running" && endTimeRef.current) {
+        const remaining = computeRemainingSeconds(endTimeRef.current);
+        setSecondsLeft(remaining);
+        if (remaining <= 0) {
+          handleComplete(new Date());
+        }
+      }
+
+      if (pendingSoundRef.current) {
+        playCompletionSound();
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => document.removeEventListener("visibilitychange", handleVisibility);
+  }, [timerState]);
+
+  const playSound = (choice: SoundChoice) => {
+    if (choice === "campana") playCampana();
+    if (choice === "digital") playDigital();
+  };
+
+  const playCompletionSound = () => {
+    const choice = soundChoiceRef.current;
+    if (choice === "none") {
+      pendingSoundRef.current = false;
+      return;
+    }
+    const result: unknown = playSound(choice);
+    if (result instanceof Promise) {
+      result
+        .then(() => {
+          pendingSoundRef.current = false;
+        })
+        .catch(() => {
+          pendingSoundRef.current = true;
+        });
+    } else {
+      pendingSoundRef.current = false;
+    }
+  };
+
+  const renderSoundSelector = () => (
+    <div className="mt-2 space-y-2">
+      {SOUND_ORDER.map((key) => {
+        const option = SOUND_OPTIONS[key];
+        return (
+          <label
+            key={key}
+            className="flex cursor-pointer items-start gap-3 rounded-xl bg-white/5 px-3 py-2 text-sm transition hover:bg-white/10"
+          >
+            <input
+              type="radio"
+              className="mt-1 h-4 w-4 accent-white"
+              checked={soundChoice === key}
+              onChange={() => setSoundChoice(key)}
+            />
+            <div className="flex-1">
+              <p className="font-medium">{option.label}</p>
+              {option.helper && (
+                <p className="text-xs text-[var(--muted)]">{option.helper}</p>
+              )}
+            </div>
+            {key !== "none" && (
+              <button
+                type="button"
+                className="text-xs text-[var(--muted)] underline transition hover:text-white"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  playSound(key);
+                }}
+              >
+                Probar
+              </button>
+            )}
+          </label>
+        );
+      })}
+    </div>
+  );
 
   const getFlipStyles = (fullscreen = false) => {
     if (isMobile) {
@@ -504,6 +810,14 @@ export default function Home() {
                   ❚❚ Pausar
                 </button>
               )}
+              {timerState !== "idle" && (
+                <button
+                  onClick={finishNow}
+                  className="pill bg-white px-5 py-3 text-sm font-semibold text-black transition hover:bg-white/90"
+                >
+                  Terminar
+                </button>
+              )}
               {timerState === "paused" && (
                 <button
                   onClick={resumeTimer}
@@ -539,7 +853,7 @@ export default function Home() {
       </div>
 
       <div className="mx-auto flex max-w-6xl flex-col gap-8 px-6 py-10">
-        <nav className="glass relative flex items-center justify-between rounded-3xl px-5 py-4">
+        <nav className="glass relative z-40 flex items-center justify-between rounded-3xl px-5 py-4">
           <div className="flex items-center gap-3">
             <div className="grid h-10 w-10 place-items-center rounded-2xl bg-white/10 text-sm font-semibold text-foreground">
               ⏱️
@@ -558,12 +872,33 @@ export default function Home() {
                 <span className="rounded-full bg-white/5 px-3 py-2 text-sm text-[var(--muted)]">
                   {user.email}
                 </span>
-                <button
-                  onClick={handleLogout}
-                  className="pill bg-white px-4 py-2 text-xs font-semibold text-black transition hover:bg-white/90"
-                >
-                  Cerrar sesión
-                </button>
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setSettingsOpen((v) => !v)}
+                    className="pill bg-white px-4 py-2 text-xs font-semibold text-black transition hover:bg-white/90"
+                    aria-label="Abrir ajustes"
+                    aria-expanded={settingsOpen}
+                  >
+                    ⚙️ Ajustes
+                  </button>
+                  {settingsOpen && (
+                    <div className="absolute right-0 top-12 z-50 w-80 rounded-2xl bg-black/90 p-4 shadow-3xl backdrop-blur">
+                      <p className="text-xs uppercase tracking-wide text-[var(--muted)]">
+                        Sonido al terminar
+                      </p>
+                      {renderSoundSelector()}
+                      <div className="mt-3 border-t border-white/10 pt-3">
+                        <button
+                          onClick={handleLogout}
+                          className="w-full rounded-xl bg-white px-4 py-2 text-xs font-semibold text-black transition hover:bg-white/90"
+                        >
+                          Cerrar sesión
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
               </>
             ) : (
               <a
@@ -585,11 +920,17 @@ export default function Home() {
               ☰
             </button>
             {navOpen && (
-              <div className="absolute right-4 top-16 z-40 w-56 rounded-2xl bg-black/80 p-3 shadow-2xl backdrop-blur">
+              <div className="absolute right-4 top-16 z-50 w-64 rounded-2xl bg-black/85 p-3 shadow-3xl backdrop-blur">
                 {user ? (
                   <>
                     <div className="rounded-xl bg-white/5 px-3 py-2 text-sm text-[var(--muted)]">
                       {user.email}
+                    </div>
+                    <div className="mt-3 rounded-2xl bg-white/5 p-3">
+                      <p className="text-xs uppercase tracking-wide text-[var(--muted)]">
+                        Sonido al terminar
+                      </p>
+                      {renderSoundSelector()}
                     </div>
                     <button
                       onClick={() => {
@@ -709,6 +1050,12 @@ export default function Home() {
                               <p className="text-xs text-[var(--muted)]">
                                 {friendlyMinutes(total)} acumulados
                               </p>
+                              {project.goalPeriod && project.goalMinutes && (
+                                <p className="text-[11px] text-white/75">
+                                  Meta {GOAL_PERIOD_LABELS[project.goalPeriod]}:{" "}
+                                  {friendlyMinutes(project.goalMinutes)}
+                                </p>
+                              )}
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
@@ -754,6 +1101,42 @@ export default function Home() {
                       {friendlyMinutes(projectTotals.get(selectedProjectId ?? "") ?? 0)} acumulados
                     </div>
                   </div>
+
+                  {activeGoalProgress && (
+                    <div className="mt-6 rounded-2xl bg-white/5 p-4">
+                      <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+                        <div>
+                          <p className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                            Meta {activeGoalProgress.periodLabel}
+                          </p>
+                          <p className="text-lg font-semibold">
+                            {activeGoalProgress.windowLabel}:{" "}
+                            {friendlyMinutes(activeGoalProgress.completedMinutes)} de{" "}
+                            {friendlyMinutes(activeGoalProgress.targetMinutes)}
+                          </p>
+                        </div>
+                        <div className="text-left sm:text-right">
+                          <p className="text-xl font-semibold text-white">
+                            {activeGoalProgress.percentage}%
+                          </p>
+                          <p className="text-sm text-[var(--muted)]">
+                            {activeGoalProgress.remainingMinutes > 0
+                              ? `Faltan ${friendlyMinutes(activeGoalProgress.remainingMinutes)}`
+                              : "Meta completa"}
+                          </p>
+                        </div>
+                      </div>
+                      <div className="mt-3 h-3 overflow-hidden rounded-full bg-black/30">
+                        <div
+                          className="h-full rounded-full transition-all"
+                          style={{
+                            width: `${activeGoalProgress.percentage}%`,
+                            backgroundColor: activeProject?.color ?? "#ffffff",
+                          }}
+                        />
+                      </div>
+                    </div>
+                  )}
 
                   <div className="mt-8 grid gap-6 lg:grid-cols-[1.3fr,0.9fr]">
                     <div className="rounded-3xl bg-black/30 p-6 text-center shadow-2xl">
@@ -841,6 +1224,12 @@ export default function Home() {
                               Pausar
                             </button>
                             <button
+                              onClick={finishNow}
+                              className="pill bg-white px-5 py-3 text-sm font-semibold text-black transition hover:bg-white/90"
+                            >
+                  Terminar
+                            </button>
+                            <button
                               onClick={resetTimer}
                               className="pill bg-white/10 px-5 py-3 text-sm font-semibold text-foreground transition hover:bg-white/20"
                             >
@@ -855,6 +1244,12 @@ export default function Home() {
                               className="pill bg-white px-5 py-3 text-sm font-semibold text-black transition hover:bg-white/90"
                             >
                               Reanudar
+                            </button>
+                            <button
+                              onClick={finishNow}
+                              className="pill bg-white px-5 py-3 text-sm font-semibold text-black transition hover:bg-white/90"
+                            >
+                  Terminar
                             </button>
                             <button
                               onClick={resetTimer}
@@ -899,6 +1294,82 @@ export default function Home() {
                     </div>
 
                     <div className="rounded-3xl bg-white/5 p-5">
+                      <div className="rounded-2xl bg-black/20 p-4">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <p className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                              Meta del proyecto
+                            </p>
+                            <h3 className="text-lg font-semibold">
+                              {activeProject?.goalPeriod ? "Editar meta" : "Crear meta"}
+                            </h3>
+                          </div>
+                          {activeProject?.goalPeriod && (
+                            <span className="pill bg-white/10 px-3 py-1 text-xs text-[var(--muted)]">
+                              {GOAL_PERIOD_LABELS[activeProject.goalPeriod]}
+                            </span>
+                          )}
+                        </div>
+
+                        <div className="mt-4 grid grid-cols-2 gap-2 rounded-2xl bg-white/5 p-1">
+                          {(["DAILY", "WEEKLY"] as GoalPeriod[]).map((period) => (
+                            <button
+                              key={period}
+                              type="button"
+                              disabled={!activeProject || isSavingGoal}
+                              onClick={() => setGoalPeriod(period)}
+                              className={`rounded-xl px-3 py-2 text-xs font-semibold transition disabled:opacity-50 ${
+                                goalPeriod === period
+                                  ? "bg-white text-black"
+                                  : "text-[var(--muted)] hover:bg-white/10 hover:text-white"
+                              }`}
+                            >
+                              {GOAL_PERIOD_LABELS[period]}
+                            </button>
+                          ))}
+                        </div>
+
+                        <label className="mt-4 block text-xs uppercase tracking-wide text-[var(--muted)]">
+                          Minutos de foco
+                        </label>
+                        <div className="mt-2 flex items-center gap-2">
+                          <input
+                            type="number"
+                            min={1}
+                            max={goalPeriod === "DAILY" ? 1440 : 10080}
+                            value={goalMinutes}
+                            disabled={!activeProject || isSavingGoal}
+                            onChange={(e) => setGoalMinutes(e.target.value)}
+                            className="h-11 flex-1 rounded-xl border border-white/10 bg-white/5 px-3 text-sm text-foreground outline-none focus:border-white/30 disabled:opacity-60"
+                          />
+                          <span className="text-xs text-[var(--muted)]">
+                            {goalPeriod === "DAILY" ? "por día" : "por semana"}
+                          </span>
+                        </div>
+
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={saveProjectGoal}
+                            disabled={!activeProject || isSavingGoal}
+                            className="pill bg-white px-4 py-2 text-xs font-semibold text-black transition hover:bg-white/90 disabled:opacity-50"
+                          >
+                            {isSavingGoal ? "Guardando..." : "Guardar meta"}
+                          </button>
+                          {activeProject?.goalPeriod && (
+                            <button
+                              type="button"
+                              onClick={clearProjectGoal}
+                              disabled={isSavingGoal}
+                              className="pill bg-white/10 px-4 py-2 text-xs font-semibold text-foreground transition hover:bg-white/20 disabled:opacity-50"
+                            >
+                              Quitar
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="mt-5 border-t border-white/10 pt-5">
                       <div className="flex items-center justify-between">
                         <h3 className="text-lg font-semibold">Sesiones recientes</h3>
                         <span className="text-xs text-[var(--muted)]">
@@ -940,6 +1411,7 @@ export default function Home() {
                             Aún no hay sesiones para este proyecto.
                           </p>
                         )}
+                      </div>
                       </div>
                     </div>
                   </div>

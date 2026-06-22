@@ -1,0 +1,65 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: focopulse-web:latest
+    restart: unless-stopped
+    expose:
+      - "3000"
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-focopulse}:${POSTGRES_PASSWORD:?Definir POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-focopulse}?schema=public"
+      APP_ORIGIN: "${APP_ORIGIN:?Definir APP_ORIGIN, por ejemplo https://focopulse.example.com}"
+      ALLOWED_ORIGINS: "${ALLOWED_ORIGINS:-}"
+    depends_on:
+      db:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /app/.next/cache:uid=1001,gid=1001,mode=0750
+      - /home/nextjs/.cache:uid=1001,gid=1001,mode=0750
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      proxy_net:
+        aliases:
+          - focopulse-web
+      backend:
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-focopulse}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Definir POSTGRES_PASSWORD}"
+      POSTGRES_DB: "${POSTGRES_DB:-focopulse}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-focopulse} -d ${POSTGRES_DB:-focopulse}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend
+
+volumes:
+  postgres_data:
+
+networks:
+  proxy_net:
+    external: true
+  backend:
+    internal: true

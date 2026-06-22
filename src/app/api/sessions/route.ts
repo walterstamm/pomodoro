@@ -1,13 +1,17 @@
 import { prisma } from "@/lib/prisma";
 import { currentUser } from "@/lib/auth";
 import { NextResponse } from "next/server";
+import {
+  rejectUntrustedOrigin,
+  requireJson,
+} from "@/lib/api-security";
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const projectId = searchParams.get("projectId") ?? undefined;
 
   try {
-    const user = await currentUser();
+    const user = await currentUser(request);
     if (!user) {
       return NextResponse.json({ message: "No autenticado" }, { status: 401 });
     }
@@ -32,7 +36,12 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const user = await currentUser();
+    const originError = rejectUntrustedOrigin(request);
+    if (originError) return originError;
+    const contentTypeError = requireJson(request);
+    if (contentTypeError) return contentTypeError;
+
+    const user = await currentUser(request);
     if (!user) {
       return NextResponse.json({ message: "No autenticado" }, { status: 401 });
     }
@@ -43,10 +52,27 @@ export async function POST(request: Request) {
     if (
       typeof projectId !== "string" ||
       typeof startedAt !== "string" ||
-      typeof endedAt !== "string"
+      typeof endedAt !== "string" ||
+      projectId.length > 64
     ) {
       return NextResponse.json(
         { message: "Faltan datos de sesión" },
+        { status: 400 },
+      );
+    }
+    const parsedStartedAt = new Date(startedAt);
+    const parsedEndedAt = new Date(endedAt);
+    const parsedDuration = Number(durationMinutes);
+    if (
+      Number.isNaN(parsedStartedAt.getTime()) ||
+      Number.isNaN(parsedEndedAt.getTime()) ||
+      parsedEndedAt <= parsedStartedAt ||
+      !Number.isFinite(parsedDuration) ||
+      parsedDuration < 1 ||
+      parsedDuration > 180
+    ) {
+      return NextResponse.json(
+        { message: "Los datos temporales de la sesión no son válidos." },
         { status: 400 },
       );
     }
@@ -64,9 +90,9 @@ export async function POST(request: Request) {
     const session = await prisma.session.create({
       data: {
         projectId,
-        startedAt: new Date(startedAt),
-        endedAt: new Date(endedAt),
-        durationMinutes: Math.max(1, Math.round(Number(durationMinutes) || 0)),
+        startedAt: parsedStartedAt,
+        endedAt: parsedEndedAt,
+        durationMinutes: Math.round(parsedDuration),
       },
     });
 

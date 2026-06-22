@@ -48,3 +48,14 @@ npm run dev
 - El proveedor está configurado para PostgreSQL.
 - Usa `npx prisma db push` para crear tablas en la base indicada por `DATABASE_URL`.
 - Cliente Prisma generado en `src/generated/prisma` (ver `prisma.config.ts`).
+
+### Despliegue con Portainer
+- Guía paso a paso en `PORTAINER.md`.
+- Define `POSTGRES_PASSWORD` y `APP_ORIGIN` en las variables del stack.
+- `APP_ORIGIN` debe ser la URL HTTPS pública exacta, sin barra final.
+- Para probar una web local contra la API, agrega `http://localhost:*` y
+  `http://127.0.0.1:*` a `ALLOWED_ORIGINS`.
+- PostgreSQL sólo está disponible en la red interna de Docker.
+- La API y la web se publican juntas en `APP_PORT` (por defecto `3000`).
+- Coloca un proxy inverso con TLS delante del contenedor.
+- El contrato para React Native está en `MOBILE_AUTH_MIGRATION.md`.

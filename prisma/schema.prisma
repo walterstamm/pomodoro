@@ -12,15 +12,22 @@ datasource db {
   provider = "postgresql"
 }
 
+enum GoalPeriod {
+  DAILY
+  WEEKLY
+}
+
 model Project {
-  id         String    @id @default(cuid())
-  userId     String
-  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name       String
-  color      String    @default("#0ea5e9")
-  createdAt  DateTime  @default(now())
-  updatedAt  DateTime  @updatedAt
-  sessions   Session[]
+  id          String      @id @default(cuid())
+  userId      String
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name        String
+  color       String      @default("#0ea5e9")
+  goalPeriod  GoalPeriod?
+  goalMinutes Int?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+  sessions    Session[]
 }
 
 model Session {
@@ -47,10 +54,38 @@ model User {
 }
 
 model AuthSession {
-  id         String   @id @default(cuid())
-  tokenHash  String   @unique
-  userId     String
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  expiresAt  DateTime
-  createdAt  DateTime @default(now())
+  id               String             @id @default(cuid())
+  tokenHash        String             @unique
+  userId           String
+  user             User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt        DateTime
+  refreshExpiresAt DateTime?
+  revokedAt        DateTime?
+  lastUsedAt       DateTime            @default(now())
+  userAgent        String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @default(now()) @updatedAt
+  refreshTokens    AuthRefreshToken[]
+
+  @@index([userId, revokedAt])
+}
+
+model AuthRefreshToken {
+  id        String      @id @default(cuid())
+  tokenHash String      @unique
+  sessionId String
+  session   AuthSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
+  revokedAt DateTime?
+  createdAt DateTime    @default(now())
+
+  @@index([sessionId])
+}
+
+model RateLimit {
+  key       String   @id
+  count     Int
+  resetAt   DateTime
+  updatedAt DateTime @updatedAt
 }
