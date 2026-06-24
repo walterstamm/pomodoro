@@ -67,6 +67,15 @@ const SOUND_OPTIONS: Record<
   },
 };
 const SOUND_ORDER: SoundChoice[] = ["campana", "digital", "none"];
+const FOCUS_TIME_BLOCKS = [
+  { start: 0, end: 6, label: "00-06 hs" },
+  { start: 6, end: 9, label: "06-09 hs" },
+  { start: 9, end: 12, label: "09-12 hs" },
+  { start: 12, end: 15, label: "12-15 hs" },
+  { start: 15, end: 18, label: "15-18 hs" },
+  { start: 18, end: 21, label: "18-21 hs" },
+  { start: 21, end: 24, label: "21-00 hs" },
+];
 
 const toClock = (seconds: number) => {
   const mins = Math.floor(seconds / 60)
@@ -269,6 +278,39 @@ export default function Home() {
       ),
     [sessions, selectedProjectId],
   );
+
+  const focusSummary = useMemo(() => {
+    const { start, end } = getGoalWindow("WEEKLY", new Date());
+    const weekSessions = filteredSessions.filter((session) => {
+      const startedAt = new Date(session.startedAt);
+      return startedAt >= start && startedAt < end;
+    });
+
+    const totalMinutes = weekSessions.reduce(
+      (total, session) => total + session.durationMinutes,
+      0,
+    );
+
+    const blockCounts = FOCUS_TIME_BLOCKS.map((block) => ({
+      ...block,
+      count: weekSessions.filter((session) => {
+        const hour = new Date(session.startedAt).getHours();
+        return hour >= block.start && hour < block.end;
+      }).length,
+    }));
+    const mostActiveBlock = blockCounts.reduce(
+      (best, block) => (block.count > best.count ? block : best),
+      blockCounts[0],
+    );
+
+    return {
+      sessionsThisWeek: weekSessions.length,
+      totalMinutes,
+      averageMinutes:
+        weekSessions.length > 0 ? Math.round(totalMinutes / weekSessions.length) : 0,
+      activeBlockLabel: mostActiveBlock.count > 0 ? mostActiveBlock.label : "Sin datos",
+    };
+  }, [filteredSessions]);
 
   const activeGoalProgress = useMemo(() => {
     if (!activeProject?.goalPeriod || !activeProject.goalMinutes) return null;
@@ -1370,12 +1412,51 @@ export default function Home() {
                       </div>
 
                       <div className="mt-5 border-t border-white/10 pt-5">
-                      <div className="flex items-center justify-between">
-                        <h3 className="text-lg font-semibold">Sesiones recientes</h3>
-                        <span className="text-xs text-[var(--muted)]">
-                          {filteredSessions.length} registradas
-                        </span>
-                      </div>
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="text-xs uppercase tracking-[0.2em] text-[var(--muted)]">
+                              Resumen
+                            </p>
+                            <h3 className="text-lg font-semibold">Tu semana de foco</h3>
+                          </div>
+                          <span className="text-xs text-[var(--muted)]">
+                            {filteredSessions.length} registradas
+                          </span>
+                        </div>
+
+                        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                          <div className="rounded-2xl bg-white/5 px-3 py-3">
+                            <p className="text-2xl font-semibold">
+                              {focusSummary.sessionsThisWeek}
+                            </p>
+                            <p className="text-xs text-[var(--muted)]">
+                              sesiones esta semana
+                            </p>
+                          </div>
+                          <div className="rounded-2xl bg-white/5 px-3 py-3">
+                            <p className="text-2xl font-semibold">
+                              {friendlyMinutes(focusSummary.totalMinutes)}
+                            </p>
+                            <p className="text-xs text-[var(--muted)]">
+                              tiempo enfocado
+                            </p>
+                          </div>
+                          <div className="rounded-2xl bg-white/5 px-3 py-3">
+                            <p className="text-2xl font-semibold">
+                              {focusSummary.activeBlockLabel}
+                            </p>
+                            <p className="text-xs text-[var(--muted)]">
+                              franja mas activa
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="mt-5 flex items-center justify-between">
+                          <h3 className="text-lg font-semibold">Sesiones recientes</h3>
+                          <span className="text-xs text-[var(--muted)]">
+                            promedio {friendlyMinutes(focusSummary.averageMinutes)}
+                          </span>
+                        </div>
 
                       <div className="mt-4 space-y-3">
                         {filteredSessions.slice(0, 5).map((session) => {
