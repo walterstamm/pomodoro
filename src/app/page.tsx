@@ -5,7 +5,10 @@ import dynamic from "next/dynamic";
 import { useEffect, useMemo, useRef, useState } from "react";
 import useSound from "use-sound";
 import { apiFetch } from "@/lib/client-api";
-import { computeRemainingSeconds, minutesBetween } from "../utils/time";
+import {
+  completedSessionMinutes,
+  computeRemainingSeconds,
+} from "../utils/time";
 
 const FlipClockCountdown = dynamic(
   () => import("@leenguyen/react-flip-clock-countdown").then((m) => m.default),
@@ -249,7 +252,7 @@ export default function Home() {
       const remainingSeconds = computeRemainingSeconds(endTimeRef.current);
       setSecondsLeft(remainingSeconds);
       if (remainingSeconds <= 0) {
-        handleComplete();
+        handleComplete(undefined, 0);
       }
     };
     tick();
@@ -515,6 +518,9 @@ export default function Home() {
   };
 
   const pauseTimer = () => {
+    if (endTimeRef.current) {
+      setSecondsLeft(computeRemainingSeconds(endTimeRef.current));
+    }
     setTimerState("paused");
     endTimeRef.current = null;
   };
@@ -523,8 +529,10 @@ export default function Home() {
     setTimerState("running");
   };
   const finishNow = () => {
-    setSecondsLeft(0);
-    handleComplete(new Date());
+    const remainingSeconds = endTimeRef.current
+      ? computeRemainingSeconds(endTimeRef.current)
+      : secondsLeft;
+    handleComplete(new Date(), remainingSeconds);
   };
   const resetTimer = () => {
     setTimerState("idle");
@@ -535,16 +543,23 @@ export default function Home() {
     pendingSoundRef.current = false;
   };
 
-  const handleComplete = async (forcedEndTime?: Date) => {
+  const handleComplete = async (
+    forcedEndTime?: Date,
+    remainingSeconds = secondsLeft,
+  ) => {
     if (completingRef.current) return;
     completingRef.current = true;
 
     setTimerState("idle");
     playCompletionSound();
     const endTime = forcedEndTime ?? new Date();
+    const completedSeconds = duration * 60 - remainingSeconds;
     const startTime =
-      startedAt ?? new Date(endTime.getTime() - (duration * 60 - secondsLeft) * 1000);
-    const actualMinutes = minutesBetween(startTime, endTime);
+      startedAt ?? new Date(endTime.getTime() - completedSeconds * 1000);
+    const actualMinutes = completedSessionMinutes(
+      duration * 60,
+      remainingSeconds,
+    );
 
     if (!selectedProjectId) {
       resetTimer();
